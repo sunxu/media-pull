@@ -23,10 +23,10 @@ fi
 EOF
 chmod +x "$test_dir/bin/docker"
 
-printf 'no\n' | PATH="$test_dir/bin:$PATH" DELETE_LOG="$test_dir/deleted" ./media-clean >/dev/null
+printf 'no\n' | PATH="$test_dir/bin:$PATH" DELETE_LOG="$test_dir/deleted" ./bin/media-clean >/dev/null
 [ ! -e "$test_dir/deleted" ]
 
-printf 'yes\n' | PATH="$test_dir/bin:$PATH" DELETE_LOG="$test_dir/deleted" ./media-clean >/dev/null
+printf 'yes\n' | PATH="$test_dir/bin:$PATH" DELETE_LOG="$test_dir/deleted" ./bin/media-clean >/dev/null
 [ "$(cat "$test_dir/deleted")" = "$(printf '%s\n%s' \
   'gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:proxy' \
   'ghcr.io/sunxu/media-bundle:direct')" ]

@@ -76,13 +76,13 @@ IMAGE=media-bundle:local \
 直接运行仓库脚本，目标目录必须为空：
 
 ```bash
-./media-pull 20260831-135655 ./downloads
+./bin/media-pull 20260831-135655 ./downloads
 ```
 
 或安装为命令：
 
 ```bash
-install -m 0755 media-pull /usr/local/bin/media-pull
+install -m 0755 bin/media-pull /usr/local/bin/media-pull
 media-pull 20260831-135655 ./downloads
 ```
 
@@ -91,7 +91,7 @@ media-pull 20260831-135655 ./downloads
 ## 清理本地镜像
 
 ```bash
-./media-clean
+./bin/media-clean
 ```
 
 脚本会列出本地直连和代理地址下的 `sunxu/media-bundle` 镜像，只有输入完整的 `yes` 才会删除。删除不使用 `--force`，仍被容器引用的镜像会保留并报错。
@@ -114,7 +114,7 @@ GitHub 官方记录的 GHCR 硬限制是每 layer 10 GB、上传超时 10 分钟
 ```bash
 python3 -m unittest discover -s tests -v
 sh tests/test_media_clean.sh
-sh -n media-pull media-clean scripts/build-local.sh tests/test_media_clean.sh
+sh -n bin/media-pull bin/media-clean scripts/build-local.sh tests/test_media_clean.sh
 ```
 
 若本机有 Docker，再用小型真实 manifest 运行本地构建，并检查：
