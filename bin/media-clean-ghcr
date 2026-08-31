@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+endpoint=/users/sunxu/packages/container/media-bundle/versions
+api_version='X-GitHub-Api-Version: 2026-03-10'
+versions=$(gh api --paginate -H "$api_version" "$endpoint?per_page=100" \
+  --jq '.[] | [.id, ((.metadata.container.tags // []) | join(",")), .updated_at] | @tsv')
+
+if [ -z "$versions" ]; then
+  echo "No sunxu/media-bundle versions found on GitHub."
+  exit 0
+fi
+
+printf 'ID\tTAGS\tUPDATED\n%s\n' "$versions"
+printf 'Type "yes" to delete all versions listed above: '
+IFS= read -r answer || answer=
+if [ "$answer" != yes ]; then
+  echo "Canceled."
+  exit 0
+fi
+
+printf '%s\n' "$versions" | cut -f1 | while IFS= read -r id; do
+  gh api --method DELETE -H "$api_version" --silent "$endpoint/$id"
+  echo "Deleted version $id"
+done

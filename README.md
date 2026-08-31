@@ -96,6 +96,15 @@ media-pull 20260831-135655 ./downloads
 
 脚本会列出本地直连和代理地址下的 `sunxu/media-bundle` 镜像，只有输入完整的 `yes` 才会删除。删除不使用 `--force`，仍被容器引用的镜像会保留并报错。
 
+## 清理 GHCR 镜像
+
+```bash
+gh auth refresh -s read:packages -s delete:packages
+./bin/media-clean-ghcr
+```
+
+脚本会分页列出 GitHub 上 `sunxu/media-bundle` 的所有版本、tags 和更新时间，只有输入完整的 `yes` 才会删除列出的版本，不删除 package 本身。
+
 ## Layer 分包与限制
 
 脚本按稳定的输出路径顺序分包，每个分组的估算上限为 **100,000,000 bytes（100 MB）**，每组生成一个独立 `COPY` layer。估算包含按 512 bytes 对齐的文件内容、每文件 16 KiB 的 tar/目录余量和路径余量；同时限制路径深度与长度。单个媒体文件无法跨 OCI layer 后仍表现为一个普通文件，所以超过预算的单文件会明确失败；应在源端切分后再构建。
@@ -114,7 +123,8 @@ GitHub 官方记录的 GHCR 硬限制是每 layer 10 GB、上传超时 10 分钟
 ```bash
 python3 -m unittest discover -s tests -v
 sh tests/test_media_clean.sh
-sh -n bin/media-pull bin/media-clean scripts/build-local.sh tests/test_media_clean.sh
+sh tests/test_media_clean_ghcr.sh
+sh -n bin/media-pull bin/media-clean bin/media-clean-ghcr scripts/build-local.sh tests/test_media_clean.sh tests/test_media_clean_ghcr.sh
 ```
 
 若本机有 Docker，再用小型真实 manifest 运行本地构建，并检查：
