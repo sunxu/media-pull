@@ -5,7 +5,7 @@
 ## 架构
 
 ```text
-MANIFEST_URL / MANIFEST_TOKEN (GitHub Secrets)
+manifest_url (workflow input) / MANIFEST_TOKEN (GitHub Secret)
                     |
                     v
  scripts/prepare.py: URL 去重 -> 并行续传/重试
@@ -40,18 +40,15 @@ https://cdn.example.com/movie.mp4
 
 ## GitHub 配置与发布
 
-在私有仓库的 **Settings → Secrets and variables → Actions** 添加：
+如果读取 manifest 需要 Bearer token，在私有仓库的 **Settings → Secrets and variables → Actions** 添加可选的 `MANIFEST_TOKEN`。它只发送给最初的 manifest 请求，不发送给媒体 URL，重定向时也不转发。
 
-- `MANIFEST_URL`：私有 manifest 的 HTTPS URL。
-- `MANIFEST_TOKEN`：可选；读取 manifest 所需的 Bearer token。它只发送给最初的 manifest 请求，不发送给媒体 URL，重定向时也不转发。
-
-然后运行 **Actions → Build public media image → Run workflow**。默认发布：
+然后运行 **Actions → Build public media image → Run workflow**，填写必需的 `manifest_url`。默认并发数为 16；`tag` 留空时使用任务开始时的 UTC 时间（`YYYYMMDD-HHMMSS`），例如：
 
 ```text
-ghcr.io/${{ github.repository_owner }}/media-bundle:latest
+ghcr.io/${{ github.repository_owner }}/media-bundle:20260831-133608
 ```
 
-可覆盖 `tag`、下载并发数（1–64）和 manifest URL。workflow 输入会保存在运行元数据中，因此 `manifest_url` 输入只应用于非敏感 URL；私有或带签名参数的 URL 应放在 `MANIFEST_URL` Secret。
+workflow 输入会保存在运行元数据中，因此 `manifest_url` 不应包含敏感签名参数。
 
 GHCR 首次发布的 package 默认是 private。发布成功后，到用户或组织的 **Packages → media-bundle → Package settings → Change visibility → Public** 完成一次性设置。公开后任何人可匿名 pull；GitHub 目前警告 public package 不能再改回 private。参见 GitHub 官方的 [package 可见性配置](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)。
 

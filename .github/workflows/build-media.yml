@@ -4,19 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Image tag
-        required: true
-        default: latest
-        type: string
-      manifest_url:
-        description: Optional non-secret manifest URL; leave blank to use the MANIFEST_URL secret
+        description: Image tag; defaults to the current UTC time (YYYYMMDD-HHMMSS)
         required: false
         default: ""
+        type: string
+      manifest_url:
+        description: Manifest URL
+        required: true
         type: string
       concurrency:
         description: Parallel downloads
         required: true
-        default: "8"
+        default: "16"
         type: string
 
 permissions:
@@ -39,13 +38,14 @@ jobs:
           TAG: ${{ inputs.tag }}
           DOWNLOAD_JOBS: ${{ inputs.concurrency }}
         run: |
+          TAG="${TAG:-$(date -u +%Y%m%d-%H%M%S)}"
           [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "Invalid image tag" >&2; exit 1; }
           [[ "$DOWNLOAD_JOBS" =~ ^[1-9][0-9]*$ ]] && (( DOWNLOAD_JOBS <= 64 )) || { echo "Concurrency must be 1..64" >&2; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Download and prepare layers
         env:
-          MANIFEST_URL: ${{ inputs.manifest_url || secrets.MANIFEST_URL }}
+          MANIFEST_URL: ${{ inputs.manifest_url }}
           MANIFEST_TOKEN: ${{ secrets.MANIFEST_TOKEN }}
           JOBS: ${{ inputs.concurrency }}
         run: python3 scripts/prepare.py --manifest-url "$MANIFEST_URL" --jobs "$JOBS"
