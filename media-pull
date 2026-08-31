@@ -2,11 +2,12 @@
 set -eu
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ "$1" = "--help" ]; then
-  echo "Usage: media-pull IMAGE[:TAG] [DESTINATION]" >&2
+  echo "Usage: media-pull TAG [DESTINATION]" >&2
   exit 2
 fi
 
-image=$1
+tag=$1
+image=gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:$tag
 destination=${2:-./data}
 
 if [ -e "$destination" ] && [ ! -d "$destination" ]; then
@@ -18,9 +19,9 @@ if [ -d "$destination" ] && [ -n "$(find "$destination/." -mindepth 1 -maxdepth 
   exit 1
 fi
 
-docker pull -- "$image"
+docker pull --platform linux/amd64 -- "$image"
 mkdir -p "$destination"
-container=$(docker create -- "$image" /media-bundle-export)
+container=$(docker create --platform linux/amd64 -- "$image" /media-bundle-export)
 trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
 docker cp "$container:/data/." "$destination/"
 docker rm "$container" >/dev/null

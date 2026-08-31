@@ -75,5 +75,6 @@ jobs:
         with:
           context: .media-build/context
           file: .media-build/context/Dockerfile
+          provenance: false
           push: true
           tags: ${{ env.IMAGE }}:${{ steps.input.outputs.tag }}

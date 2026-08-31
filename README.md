@@ -17,7 +17,7 @@ manifest_url (workflow input) / MANIFEST_TOKEN (GitHub Secret)
  FROM scratch + one COPY per <= 100,000,000-byte estimated layer group
                     |
                     v
- ghcr.io/OWNER/media-bundle:TAG -> media-pull -> local directory
+ TAG -> gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:TAG -> media-pull -> local directory
 ```
 
 下载发生在 `docker build` 之前。manifest、URL、Bearer token 和下载报告都不在 Docker build context 中，也不通过 `ARG`、`ENV` 或 `--build-arg` 传入，因此不会进入镜像 layer、配置或历史。
@@ -76,17 +76,17 @@ IMAGE=media-bundle:local \
 直接运行仓库脚本，目标目录必须为空：
 
 ```bash
-./media-pull ghcr.io/OWNER/media-bundle:latest ./downloads
+./media-pull 20260831-135655 ./downloads
 ```
 
 或安装为命令：
 
 ```bash
 install -m 0755 media-pull /usr/local/bin/media-pull
-media-pull ghcr.io/OWNER/media-bundle:latest ./downloads
+media-pull 20260831-135655 ./downloads
 ```
 
-它依次执行 `docker pull`、`docker create`、`docker cp /data/.` 和 `docker rm`。临时容器不会启动；scratch 镜像不需要可执行命令。
+脚本将 tag 拼接为 `gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:TAG`，再按 `linux/amd64` 平台依次执行 `docker pull`、`docker create`、`docker cp /data/.` 和 `docker rm`。临时容器不会启动；scratch 镜像不需要可执行命令。
 
 ## Layer 分包与限制
 
