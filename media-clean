@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+direct=$(docker image ls --filter 'reference=ghcr.io/sunxu/media-bundle:*' --format '{{.Repository}}:{{.Tag}}')
+proxy=$(docker image ls --filter 'reference=gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:*' --format '{{.Repository}}:{{.Tag}}')
+images=$(printf '%s\n%s\n' "$direct" "$proxy" | sed '/^$/d' | sort -u)
+
+if [ -z "$images" ]; then
+  echo "No sunxu/media-bundle images found."
+  exit 0
+fi
+
+echo "Images to delete:"
+printf '%s\n' "$images"
+printf 'Type "yes" to delete them: '
+IFS= read -r answer || answer=
+if [ "$answer" != yes ]; then
+  echo "Canceled."
+  exit 0
+fi
+
+printf '%s\n' "$images" | while IFS= read -r image; do
+  docker image rm -- "$image"
+done
