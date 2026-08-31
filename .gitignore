@@ -1,0 +1,6 @@
+.media-build/
+.media-cache/
+.DS_Store
+__pycache__/
+outputs/
+work/

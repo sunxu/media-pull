@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ "$1" = "--help" ]; then
+  echo "Usage: media-pull IMAGE[:TAG] [DESTINATION]" >&2
+  exit 2
+fi
+
+image=$1
+destination=${2:-./data}
+
+if [ -e "$destination" ] && [ ! -d "$destination" ]; then
+  echo "media-pull: destination is not a directory: $destination" >&2
+  exit 1
+fi
+if [ -d "$destination" ] && [ -n "$(find "$destination/." -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  echo "media-pull: destination must be empty: $destination" >&2
+  exit 1
+fi
+
+docker pull -- "$image"
+mkdir -p "$destination"
+container=$(docker create -- "$image" /media-bundle-export)
+trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
+docker cp "$container:/data/." "$destination/"
+docker rm "$container" >/dev/null
+trap - EXIT HUP INT TERM
+
+echo "Extracted $image to $destination"
