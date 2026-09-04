@@ -5,7 +5,10 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 PORT="${MANIFEST_SHARE_PORT:-18787}"
-IMAGE="${MICROBIN_IMAGE:-danielszabo99/microbin:latest}"
+# Pinned version, not :latest, so the tool doesn't silently pick up
+# upstream breaking changes. Bump deliberately via MICROBIN_IMAGE override
+# or by editing this default.
+IMAGE="${MICROBIN_IMAGE:-danielszabo99/microbin:2.1.4}"
 CONTAINER_NAME="${MANIFEST_SHARE_CONTAINER:-media-pull-manifest-share}"
 
 DATA_DIR="$APP_DIR/data"
@@ -13,15 +16,12 @@ CF_HOME="$APP_DIR/cloudflare-home"
 TUNNEL_LOG="$APP_DIR/cloudflared.log"
 PID_FILE="$APP_DIR/cloudflared.pid"
 URL_FILE="$APP_DIR/url"
+ADMIN_PASS_FILE="$APP_DIR/admin_password"
 
 # Static part of the footer script. `window.__MANIFEST_SHARE_PUBLIC_ORIGIN__`
 # is defined separately (see build_footer_text) so the JS keeps working even
 # though the origin is known only at container-launch time.
 STATIC_FOOTER_SCRIPT="$(cat <<'HTML'
-<style>
-  table { min-width: unset !important; table-layout: auto !important; }
-  th, td { white-space: normal !important; word-break: break-word; }
-</style>
 <script>
 (() => {
   const copy = async (text) => {
@@ -132,6 +132,17 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "找不到命令: $1"
 }
 
+# Generates a fresh high-entropy admin password so MicroBin's documented
+# default (m1cr0b1n) is never left active. Called once per real container
+# (re)creation, never reused across restarts.
+generate_admin_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | cut -c1-24
+  else
+    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+  fi
+}
+
 container_running() {
   docker inspect \
     -f '{{.State.Running}}' \
@@ -215,6 +226,14 @@ show_url() {
   echo "  ${url}/list"
   echo
 
+  if [[ -f "$ADMIN_PASS_FILE" ]]; then
+    echo "Admin:"
+    echo "  URL:      ${url}/admin"
+    echo "  Username: admin"
+    echo "  Password: $(cat "$ADMIN_PASS_FILE")"
+    echo
+  fi
+
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy
     echo "📋 公网 URL 已复制到剪贴板"
@@ -244,6 +263,10 @@ start_microbin() {
 
   echo "Starting MicroBin on 127.0.0.1:${PORT}..."
 
+  local admin_password
+  admin_password="$(generate_admin_password)"
+  (umask 077; printf '%s' "$admin_password" > "$ADMIN_PASS_FILE")
+
   docker run -d \
     --rm \
     --name "$CONTAINER_NAME" \
@@ -255,6 +278,8 @@ start_microbin() {
     -e MICROBIN_ENCRYPTION_CLIENT_SIDE=false \
     -e MICROBIN_ENCRYPTION_SERVER_SIDE=false \
     -e MICROBIN_HIDE_FOOTER=false \
+    -e MICROBIN_ADMIN_USERNAME=admin \
+    -e "MICROBIN_ADMIN_PASSWORD=${admin_password}" \
     -e "MANIFEST_SHARE_PUBLIC_ORIGIN=${public_origin}" \
     -e "MICROBIN_FOOTER_TEXT=$(build_footer_text "$public_origin")" \
     "$IMAGE" >/dev/null
@@ -262,6 +287,7 @@ start_microbin() {
   if ! wait_local; then
     docker logs "$CONTAINER_NAME" 2>&1 || true
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    rm -f "$ADMIN_PASS_FILE"
     die "MicroBin 启动失败"
   fi
 }
@@ -354,6 +380,8 @@ stop() {
     docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 
+  rm -f "$ADMIN_PASS_FILE"
+
   echo "✅ Manifest Share 已停止"
   echo "📁 数据保留在: $DATA_DIR"
 }
@@ -404,7 +432,7 @@ logs() {
 clean() {
   stop
   rm -rf "$CF_HOME"
-  rm -f "$TUNNEL_LOG" "$PID_FILE" "$URL_FILE"
+  rm -f "$TUNNEL_LOG" "$PID_FILE" "$URL_FILE" "$ADMIN_PASS_FILE"
 
   echo "✅ 已清理运行文件，data/ 保留"
 }

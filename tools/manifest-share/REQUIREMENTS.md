@@ -59,7 +59,8 @@ tools/manifest-share/
 ├── cloudflare-home/       # cloudflared 独立 HOME
 ├── cloudflared.log        # Tunnel 日志
 ├── cloudflared.pid        # Tunnel PID
-└── url                    # 当前公网 URL
+├── url                    # 当前公网 URL
+└── admin_password         # 当前 MicroBin 管理员随机密码
 ```
 
 不得主动创建以下项目级或用户级配置：
@@ -101,18 +102,32 @@ tools/manifest-share/data/
 ./tools/manifest-share/microbin-start start
 ```
 
+启动顺序必须是：
+
+```text
+Cloudflare Tunnel
+        ↓
+获得公网 URL
+        ↓
+MicroBin
+        ↓
+把公网 URL 注入 Footer JS
+```
+
+即必须先拿到 Quick Tunnel 的公网地址，再启动 MicroBin，并在启动 MicroBin 容器时把该地址通过 `MICROBIN_FOOTER_TEXT` 注入的脚本写入页面，暴露为 `window.__MANIFEST_SHARE_PUBLIC_ORIGIN__`（见第 10 节）。不得先启动 MicroBin 再补写公网地址。
+
 启动过程必须依次完成：
 
 1. 检查 `docker`。
 2. 检查 `cloudflared`。
 3. 检查 `curl`。
 4. 确认 Docker daemon 可用。
-5. 创建 `data/`。
-6. 启动 MicroBin。
-7. 等待 `http://127.0.0.1:18787` 可访问。
-8. 启动 Cloudflare Quick Tunnel。
-9. 从 `cloudflared` 输出中解析 `https://*.trycloudflare.com`。
-10. 保存公网地址到 `url`。
+5. 启动 Cloudflare Quick Tunnel。
+6. 从 `cloudflared` 输出中解析 `https://*.trycloudflare.com`。
+7. 保存公网地址到 `url`。
+8. 创建 `data/`。
+9. 启动 MicroBin，并把上一步获得的公网地址通过 Footer JS 注入。
+10. 等待 `http://127.0.0.1:18787` 可访问。
 11. 检查公网地址基本可访问。
 12. 在 macOS 上将公网地址复制到剪贴板。
 13. 默认在 macOS 浏览器中打开公网地址。
@@ -208,6 +223,15 @@ MICROBIN_HIDE_FOOTER=false
 
 必须显式关闭 footer 隐藏，`Copy URL` 功能（见第 10 节）依赖 `MICROBIN_FOOTER_TEXT` 注入的脚本渲染在 footer 中才能生效。
 
+```text
+MICROBIN_ADMIN_USERNAME=admin
+MICROBIN_ADMIN_PASSWORD=<每次启动随机生成>
+```
+
+MicroBin 自带管理界面 `/admin`，上游默认管理员密码固定为 `m1cr0b1n`，属于已知的公开默认凭据。本工具每次真正创建新的 MicroBin 容器（而非复用已运行容器）时，必须生成一个新的高强度随机密码并通过 `MICROBIN_ADMIN_PASSWORD` 注入，使默认密码彻底失效。不得省略该变量或使用固定/可预测的密码。
+
+生成的密码仅保存在 `tools/manifest-share/admin_password`（运行时文件，不提交 Git），并在启动完成后打印一次，方便用户登录 `/admin`。复用已运行容器时不生成新密码。
+
 ### 8.2 Encryption
 
 本工具不提供 Encryption 功能。
@@ -228,8 +252,6 @@ MICROBIN_ENCRYPTION_SERVER_SIDE=false
 ```text
 MICROBIN_PUBLIC_PATH
 MICROBIN_QR
-MICROBIN_SHOW_READ_STATS
-MICROBIN_PRIVATE
 MICROBIN_HASH_IDS
 ```
 
@@ -417,16 +439,9 @@ navigator.clipboard.writeText()
 
 MicroBin 原生模板对 Uploads 和 URL Redirects 两个表格都设置了 `min-width: 720px`，配合 `white-space: nowrap` 会在较窄视口下产生横向滚动条。
 
-追加 `Copy` 按钮后不得让这一情况变得更明显。
+不再通过全局 CSS（`table { min-width: unset !important; ... }` / `th, td { white-space: normal !important; ... }`）覆盖上游样式：该规则作用于站内所有表格（包括 `/admin` 等页面），影响范围超出本工具实际需要改动的内容，不建议保留。
 
-必须覆盖为：
-
-```text
-table { min-width: unset !important; }
-th, td { white-space: normal !important; }
-```
-
-允许单元格内容换行，取消强制最小宽度，使两个表格在默认视口下均不出现横向滚动条。
+追加 `Copy` 按钮时应尽量不引入新的横向滚动，但不强制覆盖 MicroBin 原生表格样式。
 
 ## 11. 数据持久化
 
@@ -530,6 +545,7 @@ cloudflare-home/
 cloudflared.log
 cloudflared.pid
 url
+admin_password
 ```
 
 必须保留：
@@ -564,6 +580,7 @@ cloudflare-home/
 cloudflared.log
 cloudflared.pid
 url
+admin_password
 ```
 
 应提交：
@@ -608,11 +625,13 @@ Cloudflare API Token
 
 ## 15. Docker 行为
 
-MicroBin 默认镜像：
+MicroBin 默认镜像固定为具体版本号，不长期使用 `:latest`：
 
 ```text
-danielszabo99/microbin:latest
+danielszabo99/microbin:2.1.4
 ```
+
+升级版本需要显式修改该默认值（或临时通过下方环境变量覆盖），不得静默跟随上游 `:latest` 滚动更新。
 
 允许通过：
 
@@ -669,7 +688,7 @@ Cloudflare Tunnel 启动失败时应打印 cloudflared 日志。
 - Quick Tunnel 是临时开发能力，不提供生产 SLA。
 - 如果未来需要长期固定 URL、访问控制或生产可靠性，应单独设计 Named Tunnel/固定域名方案。
 
-MicroBin 上游版本可能包含管理界面及默认管理凭据，因此公网使用时不得把该服务视为安全的秘密存储系统。
+MicroBin 上游版本自带管理界面（`/admin`）及固定的默认管理凭据（用户名 `admin`，密码 `m1cr0b1n`）。本工具通过每次启动生成随机高强度密码（见第 8.1 节）使该默认凭据失效，但公网使用时仍不应把该服务视为安全的秘密存储系统。
 
 ## 18. Cloudflare Quick Tunnel 限制
 
@@ -760,8 +779,6 @@ Uploads 与 URL Redirects 两个表格对应记录第二个单元格（Key 列�
 ```text
 Copy
 ```
-
-且两个表格在默认浏览器窗口宽度下均不出现横向滚动条。
 
 ### 详情页
 

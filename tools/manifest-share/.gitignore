@@ -3,4 +3,5 @@ cloudflare-home/
 cloudflared.log
 cloudflared.pid
 url
+admin_password
 .DS_Store
