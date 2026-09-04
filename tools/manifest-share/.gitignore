@@ -1,0 +1,6 @@
+data/
+cloudflare-home/
+cloudflared.log
+cloudflared.pid
+url
+.DS_Store

@@ -1,0 +1,467 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+PORT="${MANIFEST_SHARE_PORT:-18787}"
+IMAGE="${MICROBIN_IMAGE:-danielszabo99/microbin:latest}"
+CONTAINER_NAME="${MANIFEST_SHARE_CONTAINER:-media-pull-manifest-share}"
+
+DATA_DIR="$APP_DIR/data"
+CF_HOME="$APP_DIR/cloudflare-home"
+TUNNEL_LOG="$APP_DIR/cloudflared.log"
+PID_FILE="$APP_DIR/cloudflared.pid"
+URL_FILE="$APP_DIR/url"
+
+# Static part of the footer script. `window.__MANIFEST_SHARE_PUBLIC_ORIGIN__`
+# is defined separately (see build_footer_text) so the JS keeps working even
+# though the origin is known only at container-launch time.
+STATIC_FOOTER_SCRIPT="$(cat <<'HTML'
+<style>
+  table { min-width: unset !important; table-layout: auto !important; }
+  th, td { white-space: normal !important; word-break: break-word; }
+</style>
+<script>
+(() => {
+  const copy = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.style.position = 'fixed';
+      el.style.opacity = '0';
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand('copy');
+      el.remove();
+      return ok;
+    }
+  };
+
+  const linkPath = (anchor) =>
+    new URL(anchor.getAttribute('href'), location.href).pathname;
+
+  // Domain always comes from the known public tunnel origin (see
+  // build_footer_text in microbin-start), so the copied link is correct
+  // even when a page is opened locally via http://127.0.0.1.
+  const publicUrlFor = (anchor) => {
+    const origin = window.__MANIFEST_SHARE_PUBLIC_ORIGIN__ || location.origin;
+    return origin + linkPath(anchor);
+  };
+
+  const makeCopyButton = (fullUrl) => {
+    const button = document.createElement('a');
+
+    button.href = '#';
+    button.textContent = 'Copy';
+    button.dataset.copyRawUrl = '1';
+    button.style.cursor = 'pointer';
+
+    button.addEventListener('click', async (event) => {
+      event.preventDefault();
+
+      const ok = await copy(fullUrl);
+      button.textContent = ok ? 'Copied' : 'Failed';
+
+      setTimeout(() => {
+        button.textContent = 'Copy';
+      }, 1000);
+    });
+
+    return button;
+  };
+
+  // The second <td> in every data row of /list: empty in the "Uploads"
+  // table, holds MicroBin's native relative-path "Copy" button in
+  // "URL Redirects". We take over that cell entirely so both tables end
+  // up with a single, consistently placed Copy control.
+  document.querySelectorAll('tr').forEach((row) => {
+    if (row.querySelector('[data-copy-raw-url]')) return;
+
+    const tds = row.querySelectorAll('td');
+    if (tds.length < 2) return;
+
+    const target = [...row.querySelectorAll('a')].find((a) => {
+      const label = a.textContent.trim();
+      return label === 'Text' || label === 'Redirect';
+    });
+    if (!target) return;
+
+    const cell = tds[1];
+    cell.innerHTML = '';
+    cell.appendChild(makeCopyButton(publicUrlFor(target)));
+  });
+
+  // The single-item detail page (/upload/<id>) has a flat
+  // "Raw Text Content | Edit | Remove" action bar instead of a table
+  // row. Add the same Copy control right after Remove.
+  if (!document.querySelector('[data-copy-raw-url]')) {
+    const removeLink = [...document.querySelectorAll('a')]
+      .find((a) => a.textContent.trim() === 'Remove');
+
+    const target = removeLink && [...document.querySelectorAll('a')].find((a) => {
+      const label = a.textContent.replace(/\s+/g, ' ').trim();
+      return label === 'Raw Text Content' || label === 'Redirect';
+    });
+
+    if (removeLink && target) {
+      const button = makeCopyButton(publicUrlFor(target));
+      button.style.marginLeft = '1rem';
+      removeLink.after(button);
+    }
+  }
+})();
+</script>
+HTML
+)"
+
+build_footer_text() {
+  printf '<script>window.__MANIFEST_SHARE_PUBLIC_ORIGIN__ = "%s";</script>\n%s' \
+    "$1" "$STATIC_FOOTER_SCRIPT"
+}
+
+die() {
+  echo "❌ $*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "找不到命令: $1"
+}
+
+container_running() {
+  docker inspect \
+    -f '{{.State.Running}}' \
+    "$CONTAINER_NAME" 2>/dev/null | grep -q '^true$'
+}
+
+container_exists() {
+  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1
+}
+
+container_public_origin() {
+  docker inspect \
+    -f '{{range .Config.Env}}{{println .}}{{end}}' \
+    "$CONTAINER_NAME" 2>/dev/null \
+    | sed -n 's/^MANIFEST_SHARE_PUBLIC_ORIGIN=//p'
+}
+
+tunnel_alive() {
+  [[ -f "$PID_FILE" ]] || return 1
+
+  local pid
+  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+
+  ps -p "$pid" -o command= 2>/dev/null | grep -q '[c]loudflared'
+}
+
+wait_local() {
+  local i
+
+  for i in {1..40}; do
+    if curl -fsS \
+      --max-time 2 \
+      "http://127.0.0.1:${PORT}/" \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+
+    sleep 0.5
+  done
+
+  return 1
+}
+
+stop_tunnel() {
+  if tunnel_alive; then
+    local pid
+    pid="$(cat "$PID_FILE")"
+
+    kill "$pid" 2>/dev/null || true
+
+    for _ in {1..20}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+
+  rm -f "$PID_FILE" "$URL_FILE"
+}
+
+show_url() {
+  [[ -f "$URL_FILE" ]] || die "未找到公网 URL"
+
+  local url
+  url="$(cat "$URL_FILE")"
+
+  echo
+  echo "✅ Manifest Share 已启动"
+  echo
+  echo "Local:"
+  echo "  http://127.0.0.1:${PORT}"
+  echo
+  echo "Public:"
+  echo "  ${url}"
+  echo
+  echo "List:"
+  echo "  ${url}/list"
+  echo
+
+  if command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$url" | pbcopy
+    echo "📋 公网 URL 已复制到剪贴板"
+  fi
+
+  if [[ "${MANIFEST_SHARE_NO_OPEN:-0}" != "1" ]] &&
+     command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 || true
+  fi
+}
+
+start_microbin() {
+  local public_origin="$1"
+
+  mkdir -p "$DATA_DIR"
+
+  if container_running; then
+    if [[ "$(container_public_origin)" == "$public_origin" ]] && wait_local; then
+      return
+    fi
+
+    echo "MicroBin 配置需要更新，重新创建容器..."
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  elif container_exists; then
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+
+  echo "Starting MicroBin on 127.0.0.1:${PORT}..."
+
+  docker run -d \
+    --rm \
+    --name "$CONTAINER_NAME" \
+    --user "$(id -u):$(id -g)" \
+    -p "127.0.0.1:${PORT}:8080" \
+    -v "${DATA_DIR}:/app/microbin_data" \
+    -e MICROBIN_DEFAULT_PRIVACY=public \
+    -e MICROBIN_DISABLE_TELEMETRY=true \
+    -e MICROBIN_ENCRYPTION_CLIENT_SIDE=false \
+    -e MICROBIN_ENCRYPTION_SERVER_SIDE=false \
+    -e MICROBIN_HIDE_FOOTER=false \
+    -e "MANIFEST_SHARE_PUBLIC_ORIGIN=${public_origin}" \
+    -e "MICROBIN_FOOTER_TEXT=$(build_footer_text "$public_origin")" \
+    "$IMAGE" >/dev/null
+
+  if ! wait_local; then
+    docker logs "$CONTAINER_NAME" 2>&1 || true
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    die "MicroBin 启动失败"
+  fi
+}
+
+start_tunnel() {
+  if tunnel_alive && [[ -f "$URL_FILE" ]]; then
+    return
+  fi
+
+  stop_tunnel
+  mkdir -p "$CF_HOME"
+  rm -f "$TUNNEL_LOG"
+
+  echo "Starting Cloudflare Quick Tunnel..."
+
+  HOME="$CF_HOME" \
+    nohup cloudflared tunnel \
+      --url "http://127.0.0.1:${PORT}" \
+      >"$TUNNEL_LOG" 2>&1 </dev/null &
+
+  local pid=$!
+  echo "$pid" > "$PID_FILE"
+
+  local url=""
+  local i
+
+  for i in {1..60}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      cat "$TUNNEL_LOG" >&2 || true
+      rm -f "$PID_FILE"
+      die "cloudflared 已退出"
+    fi
+
+    url="$(
+      grep -Eo \
+        'https://[A-Za-z0-9-]+\.trycloudflare\.com' \
+        "$TUNNEL_LOG" \
+        | head -n 1 \
+        || true
+    )"
+
+    [[ -n "$url" ]] && break
+    sleep 0.5
+  done
+
+  if [[ -z "$url" ]]; then
+    cat "$TUNNEL_LOG" >&2 || true
+    stop_tunnel
+    die "未能获取 trycloudflare.com URL"
+  fi
+
+  printf '%s\n' "$url" > "$URL_FILE"
+}
+
+check_public_connectivity() {
+  local url
+  url="$(cat "$URL_FILE" 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 0
+
+  local i
+
+  for i in {1..20}; do
+    if curl -fsS --max-time 5 "$url/" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "⚠️  Tunnel 已创建，但公网连通性检查暂未通过。"
+}
+
+start() {
+  need docker
+  need cloudflared
+  need curl
+
+  docker info >/dev/null 2>&1 || die "Docker 未运行"
+
+  start_tunnel
+  start_microbin "$(cat "$URL_FILE")"
+  check_public_connectivity
+  show_url
+}
+
+stop() {
+  stop_tunnel
+
+  if container_exists; then
+    echo "Stopping MicroBin..."
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  fi
+
+  echo "✅ Manifest Share 已停止"
+  echo "📁 数据保留在: $DATA_DIR"
+}
+
+status() {
+  echo "Directory:"
+  echo "  $APP_DIR"
+  echo
+  echo "Port:"
+  echo "  $PORT"
+  echo
+  echo "MicroBin:"
+
+  if container_running && wait_local; then
+    echo "  ✅ http://127.0.0.1:${PORT}"
+  else
+    echo "  ❌ stopped"
+  fi
+
+  echo
+  echo "Cloudflare Tunnel:"
+
+  if tunnel_alive && [[ -f "$URL_FILE" ]]; then
+    echo "  ✅ PID $(cat "$PID_FILE")"
+    echo "  $(cat "$URL_FILE")"
+  else
+    echo "  ❌ stopped"
+  fi
+}
+
+logs() {
+  echo "===== MicroBin ====="
+  if container_exists; then
+    docker logs --tail=100 "$CONTAINER_NAME" 2>&1 || true
+  else
+    echo "(container not running)"
+  fi
+
+  echo
+  echo "===== cloudflared ====="
+  if [[ -f "$TUNNEL_LOG" ]]; then
+    tail -100 "$TUNNEL_LOG"
+  else
+    echo "(no log)"
+  fi
+}
+
+clean() {
+  stop
+  rm -rf "$CF_HOME"
+  rm -f "$TUNNEL_LOG" "$PID_FILE" "$URL_FILE"
+
+  echo "✅ 已清理运行文件，data/ 保留"
+}
+
+purge() {
+  clean
+  rm -rf "$DATA_DIR"
+
+  echo "✅ 已删除全部 Manifest Share 数据"
+}
+
+case "${1:-start}" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    stop
+    start
+    ;;
+  status)
+    status
+    ;;
+  url)
+    tunnel_alive || die "Cloudflare Tunnel 未运行"
+    [[ -f "$URL_FILE" ]] || die "未找到公网 URL"
+    cat "$URL_FILE"
+    ;;
+  logs)
+    logs
+    ;;
+  clean)
+    clean
+    ;;
+  purge)
+    purge
+    ;;
+  *)
+    cat <<EOF
+Usage:
+  ./microbin-start
+  ./microbin-start start
+  ./microbin-start stop
+  ./microbin-start restart
+  ./microbin-start status
+  ./microbin-start url
+  ./microbin-start logs
+  ./microbin-start clean
+  ./microbin-start purge
+
+Environment:
+  MANIFEST_SHARE_PORT       Local port (default: 18787)
+  MANIFEST_SHARE_NO_OPEN    Set to 1 to disable browser auto-open
+  MICROBIN_IMAGE            MicroBin image override
+EOF
+    exit 1
+    ;;
+esac
