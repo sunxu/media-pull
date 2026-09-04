@@ -200,9 +200,11 @@ def pack_layers(entries: list[Entry], files: dict[str, Path], layer_max_bytes: i
         size = files[entry.url].stat().st_size
         estimated_size = ((size + 511) // 512) * 512 + 16 * 1024 + 2 * len(entry.output_path.encode("utf-8"))
         if estimated_size > layer_max_bytes:
-            raise DownloadFailure(
-                [(entry.url, f"file exceeds layer budget ({estimated_size} estimated bytes > {layer_max_bytes})")]
-            )
+            if current:
+                layers.append(current)
+                current, current_size = [], 0
+            layers.append([entry])
+            continue
         if current and current_size + estimated_size > layer_max_bytes:
             layers.append(current)
             current, current_size = [], 0

@@ -14,7 +14,7 @@ manifest_url (workflow input) / MANIFEST_TOKEN (GitHub Secret)
  .media-build/context/layer-NNNN/data/... + generated Dockerfile
                     |
                     v
- FROM scratch + one COPY per <= 100,000,000-byte estimated layer group
+ FROM scratch + one COPY per ~100 MB group; oversized files use dedicated layers
                     |
                     v
  TAG -> gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:TAG -> media-pull -> local directory
@@ -107,7 +107,11 @@ gh auth refresh -s read:packages -s delete:packages
 
 ## Layer 分包与限制
 
-脚本按稳定的输出路径顺序分包，每个分组的估算上限为 **100,000,000 bytes（100 MB）**，每组生成一个独立 `COPY` layer。估算包含按 512 bytes 对齐的文件内容、每文件 16 KiB 的 tar/目录余量和路径余量；同时限制路径深度与长度。单个媒体文件无法跨 OCI layer 后仍表现为一个普通文件，所以超过预算的单文件会明确失败；应在源端切分后再构建。
+脚本按稳定的输出路径顺序分包，普通多文件分组的估算上限为 **100,000,000 bytes（100 MB）**，每组生成一个独立 `COPY` layer。估算包含按 512 bytes 对齐的文件内容、每文件 16 KiB 的 tar/目录余量和路径余量；同时限制路径深度与长度。
+
+100 MB 是多文件 layer 的目标上限，不是单文件大小限制。如果单个文件的估算大小超过 100 MB，会先结束当前分组，然后让该文件独占一个 layer；这个专用 layer 可以超过 100 MB。后续文件继续按 100 MB 规则重新分组。
+
+因此单个媒体文件不需要为了满足项目的 100 MB 分组目标而切分，镜像中仍保存原始完整文件。大文件自身对应的 OCI layer 无法进一步并行拆分，但其他 layer 仍可并行下载。
 
 GitHub 官方记录的 GHCR 硬限制是每 layer 10 GB、上传超时 10 分钟；本项目的 100 MB 是更保守的自定义限制，不是 GHCR 的硬限制。实际 registry layer 是压缩 blob，压缩后大小会因文件格式而异。参见 GitHub 官方的 [Container registry troubleshooting](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#troubleshooting)。
 

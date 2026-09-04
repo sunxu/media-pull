@@ -75,5 +75,26 @@ class PrepareTest(unittest.TestCase):
             self.assertEqual(refreshed.read_bytes(), b"updated")
 
 
+    def test_oversized_file_gets_dedicated_layer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entries = [
+                prepare.Entry("https://example.test/a.bin", "a.bin", "a.bin"),
+                prepare.Entry("https://example.test/b.bin", "b.bin", "b.bin"),
+                prepare.Entry("https://example.test/c.bin", "c.bin", "c.bin"),
+                prepare.Entry("https://example.test/d.bin", "d.bin", "d.bin"),
+            ]
+            files = {}
+            for entry, size in zip(entries, (100, 100, 40_000, 100)):
+                path = root / entry.output_path
+                path.write_bytes(b"x" * size)
+                files[entry.url] = path
+
+            layers = prepare.pack_layers(entries, files, 34_000)
+            self.assertEqual(
+                [[entry.output_path for entry in layer] for layer in layers],
+                [["a.bin", "b.bin"], ["c.bin"], ["d.bin"]],
+            )
+
 if __name__ == "__main__":
     unittest.main()
