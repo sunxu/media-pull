@@ -1,30 +1,227 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ "$1" = "--help" ]; then
-  echo "Usage: media-pull TAG [DESTINATION]" >&2
+REPO=${MEDIA_PULL_REPO:-sunxu/media-pull}
+WORKFLOW=${MEDIA_PULL_WORKFLOW:-build-media.yml}
+MANIFEST_SHARE_PORT=${MANIFEST_SHARE_PORT:-18787}
+
+usage() {
+  cat >&2 <<'EOF_USAGE'
+Usage:
+  media-pull build MANIFEST [TAG] [CONCURRENCY]
+  media-pull status [RUN_ID]
+  media-pull logs [RUN_ID]
+  media-pull TAG [DESTINATION]
+
+Commands:
+  build   Trigger the GitHub Actions media build workflow.
+          MANIFEST may be an http(s) URL or a local file.
+  status  Show the latest build run, or a specific RUN_ID.
+  logs    Show logs for the latest build run, or a specific RUN_ID.
+
+Environment:
+  MEDIA_PULL_REPO            GitHub repository (default: sunxu/media-pull)
+  MEDIA_PULL_WORKFLOW        Workflow file (default: build-media.yml)
+  MEDIA_PULL_MANIFEST_SHARE  Path to microbin-start
+  MANIFEST_SHARE_PORT        Local Manifest Share port (default: 18787)
+EOF_USAGE
   exit 2
-fi
+}
 
-tag=$1
-image=gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:$tag
-destination=${2:-./data}
+need_gh() {
+  command -v gh >/dev/null 2>&1 || {
+    echo "media-pull: gh is required; install GitHub CLI and run: gh auth login" >&2
+    exit 1
+  }
+}
 
-if [ -e "$destination" ] && [ ! -d "$destination" ]; then
-  echo "media-pull: destination is not a directory: $destination" >&2
+latest_run_id() {
+  gh run list \
+    --repo "$REPO" \
+    --workflow "$WORKFLOW" \
+    --limit 1 \
+    --json databaseId \
+    --jq '.[0].databaseId'
+}
+
+find_manifest_share() {
+  if [ -n "${MEDIA_PULL_MANIFEST_SHARE:-}" ]; then
+    [ -x "$MEDIA_PULL_MANIFEST_SHARE" ] || {
+      echo "media-pull: MEDIA_PULL_MANIFEST_SHARE is not executable: $MEDIA_PULL_MANIFEST_SHARE" >&2
+      exit 1
+    }
+    printf '%s\n' "$MEDIA_PULL_MANIFEST_SHARE"
+    return
+  fi
+
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+  candidate="$script_dir/../tools/manifest-share/microbin-start"
+  if [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  if command -v microbin-start >/dev/null 2>&1; then
+    command -v microbin-start
+    return
+  fi
+
+  echo "media-pull: cannot find tools/manifest-share/microbin-start" >&2
+  echo "media-pull: set MEDIA_PULL_MANIFEST_SHARE=/path/to/microbin-start" >&2
   exit 1
-fi
-if [ -d "$destination" ] && [ -n "$(find "$destination/." -mindepth 1 -maxdepth 1 -print -quit)" ]; then
-  echo "media-pull: destination must be empty: $destination" >&2
-  exit 1
-fi
+}
 
-docker pull --platform linux/amd64 -- "$image"
-mkdir -p "$destination"
-container=$(docker create --platform linux/amd64 -- "$image" /media-bundle-export)
-trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
-docker cp "$container:/data/." "$destination/"
-docker rm "$container" >/dev/null
-trap - EXIT HUP INT TERM
+upload_manifest() {
+  file=$1
+  [ -f "$file" ] || {
+    echo "media-pull: manifest file not found: $file" >&2
+    exit 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    echo "media-pull: curl is required for local manifest upload" >&2
+    exit 1
+  }
 
-echo "Extracted $image to $destination"
+  share=$(find_manifest_share)
+  MANIFEST_SHARE_NO_OPEN=1 "$share" start >/dev/null
+  public_origin=$("$share" url)
+
+  headers=$(mktemp)
+  trap 'rm -f "$headers"' EXIT HUP INT TERM
+  curl -fsS \
+    -D "$headers" \
+    -o /dev/null \
+    -X POST \
+    --data-urlencode "content@$file" \
+    "http://127.0.0.1:${MANIFEST_SHARE_PORT}/upload"
+
+  location=$(sed -n 's/^[Ll]ocation:[[:space:]]*//p' "$headers" | tr -d '\r' | tail -n 1)
+  rm -f "$headers"
+  trap - EXIT HUP INT TERM
+
+  [ -n "$location" ] || {
+    echo "media-pull: Manifest Share did not return an upload location" >&2
+    exit 1
+  }
+
+  case "$location" in
+    http://*|https://*) path=${location#*://}; path=/${path#*/} ;;
+    /*) path=$location ;;
+    *) path=/$location ;;
+  esac
+
+  case "$path" in
+    /upload/*) path=/p/${path#/upload/} ;;
+  esac
+
+  printf '%s%s\n' "${public_origin%/}" "$path"
+}
+
+cmd_build() {
+  [ "$#" -ge 1 ] && [ "$#" -le 3 ] || usage
+  need_gh
+
+  manifest=$1
+  tag=${2:-}
+  concurrency=${3:-16}
+
+  case "$manifest" in
+    http://*|https://*)
+      manifest_url=$manifest
+      ;;
+    *)
+      manifest_url=$(upload_manifest "$manifest")
+      echo "Manifest: $manifest_url"
+      ;;
+  esac
+
+  case "$concurrency" in
+    ''|*[!0-9]*)
+      echo "media-pull: CONCURRENCY must be an integer from 1 to 64" >&2
+      exit 1
+      ;;
+  esac
+  [ "$concurrency" -ge 1 ] && [ "$concurrency" -le 64 ] || {
+    echo "media-pull: CONCURRENCY must be an integer from 1 to 64" >&2
+    exit 1
+  }
+
+  set -- gh workflow run "$WORKFLOW" --repo "$REPO" \
+    -f "manifest_url=$manifest_url" \
+    -f "concurrency=$concurrency"
+  [ -z "$tag" ] || set -- "$@" -f "tag=$tag"
+
+  "$@"
+  echo "Build requested. Run 'media-pull status' to view its status."
+}
+
+cmd_status() {
+  [ "$#" -le 1 ] || usage
+  need_gh
+
+  run_id=${1:-}
+  if [ -z "$run_id" ]; then
+    run_id=$(latest_run_id)
+    [ -n "$run_id" ] || {
+      echo "media-pull: no runs found for $WORKFLOW" >&2
+      exit 1
+    }
+  fi
+
+  gh run view "$run_id" --repo "$REPO"
+}
+
+cmd_logs() {
+  [ "$#" -le 1 ] || usage
+  need_gh
+
+  run_id=${1:-}
+  if [ -z "$run_id" ]; then
+    run_id=$(latest_run_id)
+    [ -n "$run_id" ] || {
+      echo "media-pull: no runs found for $WORKFLOW" >&2
+      exit 1
+    }
+  fi
+
+  gh run view "$run_id" --repo "$REPO" --log
+}
+
+cmd_pull() {
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+
+  tag=$1
+  image=gh-proxy.org/docker/ghcr.io/sunxu/media-bundle:$tag
+  destination=${2:-./data}
+
+  if [ -e "$destination" ] && [ ! -d "$destination" ]; then
+    echo "media-pull: destination is not a directory: $destination" >&2
+    exit 1
+  fi
+  if [ -d "$destination" ] && [ -n "$(find "$destination/." -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+    echo "media-pull: destination must be empty: $destination" >&2
+    exit 1
+  fi
+
+  docker pull --platform linux/amd64 -- "$image"
+  mkdir -p "$destination"
+  container=$(docker create --platform linux/amd64 -- "$image" /media-bundle-export)
+  trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT HUP INT TERM
+  docker cp "$container:/data/." "$destination/"
+  docker rm "$container" >/dev/null
+  trap - EXIT HUP INT TERM
+
+  echo "Extracted $image to $destination"
+}
+
+[ "$#" -ge 1 ] || usage
+
+command=$1
+shift
+case "$command" in
+  build) cmd_build "$@" ;;
+  status) cmd_status "$@" ;;
+  logs) cmd_logs "$@" ;;
+  -h|--help|help) usage ;;
+  *) cmd_pull "$command" "$@" ;;
+esac
